@@ -14,6 +14,8 @@ It has two tools, sharing one `config.json`: **German Context** (a study PDF per
 
 ## German Context: what it generates
 
+![German Context Builder GUI](docs/german_context_gui.png)
+
 A study PDF per video, containing:
 
 - **Transcript, aligned with translation**: the spoken German is cleaned up into standard German with minimal edits (every change is recorded), and the numbered lines match the translation.

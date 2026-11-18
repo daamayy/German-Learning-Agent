@@ -145,7 +145,7 @@ def get_transcript(video_id: str) -> tuple[str, str]:
         available = list(api.list(video_id))
     except Exception as exc:
         raise RuntimeError(
-            "拿不到字幕。请确认视频是公开的、并且有字幕（自动生成的也行）。"
+            "Could not fetch subtitles. Make sure the video is public and has subtitles (auto-generated is fine)."
         ) from exc
 
     german = [t for t in available if t.language_code.lower().startswith("de")]
@@ -155,7 +155,7 @@ def get_transcript(video_id: str) -> tuple[str, str]:
         except Exception:
             continue
 
-    raise RuntimeError("这个视频没有可下载的字幕轨。")
+    raise RuntimeError("This video has no downloadable subtitle track.")
 
 
 def chunk_text(text: str, size: int = CHUNK_SIZE) -> list[str]:
@@ -402,9 +402,9 @@ def _gemini(api_key: str, system: str, user: str, max_tokens: int,
             )
             text = (resp.text or "").strip()
             if not text:
-                raise EmptyResponse(f"{model} 返回了空结果")
+                raise EmptyResponse(f"{model} returned an empty response")
             if model != MODELS[0]:
-                log_hook(f"⚠  {tag}改用备用模型 {model} 完成")
+                log_hook(f"⚠  {tag}Completed with fallback model {model}")
             return text
 
         except Exception as e:
@@ -419,8 +419,8 @@ def _gemini(api_key: str, system: str, user: str, max_tokens: int,
                 # 额度是按模型分别算的，所以换一个通常就能继续。
                 _EXHAUSTED.add(model)
                 remaining = [m for m in MODELS if m not in _EXHAUSTED]
-                log_hook(f"⚠  {tag}{model} 今日免费额度已用完，"
-                         + (f"立刻改用 {remaining[0]}" if remaining else "没有备用模型了"))
+                log_hook(f"⚠  {tag}{model} daily free quota exhausted, "
+                         + (f"switching to {remaining[0]}" if remaining else "no fallback models left"))
                 continue                 # 注意：不 sleep
 
             # 找到下一个真正会执行的尝试（跳过已耗尽的模型）
@@ -433,29 +433,29 @@ def _gemini(api_key: str, system: str, user: str, max_tokens: int,
             if next_rnd == rnd and next_model != model:
                 # 同一轮里换模型：不同模型是不同的容量池，这个满了不代表那个满，
                 # 等待没有任何意义 —— 直接换。整条链试完一遍才值得停下来等。
-                log_hook(f"↻  {tag}{model} 过载，立刻试 {next_model}")
+                log_hook(f"↻  {tag}{model} overloaded, trying {next_model}")
                 continue
 
             # 轮次边界：一整圈都不通，说明是大面积拥堵，这时才真的等
             if kind == "minute":         # 每分钟限流，Google 会告诉你等多久
                 wait = _suggested_delay(e, 20)
-                log_hook(f"⏳ {tag}每分钟限流，等 {wait:.0f}s 后重来一轮")
+                log_hook(f"⏳ {tag}Per-minute rate limit, retrying in {wait:.0f}s")
             else:
                 wait = min(10 * (3 ** rnd) + random.uniform(0, 3), 60)
-                log_hook(f"⏳ {tag}一轮 {len(MODELS)} 个模型都过载，"
-                         f"等 {wait:.0f}s 后重来  (第 {rnd + 2}/{RETRY_ROUNDS} 轮)")
+                log_hook(f"⏳ {tag}All {len(MODELS)} models overloaded, "
+                         f"retrying in {wait:.0f}s  (round {rnd + 2}/{RETRY_ROUNDS})")
             time.sleep(wait)
 
     if _EXHAUSTED and not [m for m in MODELS if m not in _EXHAUSTED]:
         raise RuntimeError(
-            f"{tag}今天所有模型的免费额度都用完了（每个模型每天 20 次请求）。"
-            f"免费额度每天重置，明天再跑即可；已经处理完的部分会自动跳过。"
-            f"想不受限制可以在 Google AI Studio 给这个 key 开通结算。"
+            f"{tag}Daily free quota exhausted for all models (20 requests per model per day). "
+            f"The quota resets daily, so just run again tomorrow; finished parts will be skipped automatically. "
+            f"For unlimited use, enable billing for this key in Google AI Studio."
         ) from last_err
 
     raise RuntimeError(
-        f"{tag}所有模型都暂时不可用（已试 {len(plan)} 次）。"
-        f"Gemini 正在高峰期，过几分钟再点一次即可 —— 已经处理完的部分会自动跳过，不用重头来。"
+        f"{tag}All models are temporarily unavailable ({len(plan)} attempts). "
+        f"Gemini is at peak load; try again in a few minutes. Finished parts will be skipped automatically."
     ) from last_err
 
 
@@ -515,7 +515,7 @@ def correct_transcript(transcript: str, api_key: str, progress=lambda *_: None,
             if blob.get("fingerprint") == fp:
                 done = {int(k): v for k, v in blob.get("chunks", {}).items()}
                 if done:
-                    log_hook(f"↩  发现上次的进度，跳过已完成的 {len(done)}/{len(chunks)} 块")
+                    log_hook(f"↩  Resuming previous run, skipping {len(done)}/{len(chunks)} completed chunks")
         except Exception:
             done = {}
 
@@ -559,19 +559,19 @@ def correct_transcript(transcript: str, api_key: str, progress=lambda *_: None,
     raw_count = len(segments)
     segments = _resegment(segments)
     if len(segments) > raw_count:
-        log_hook(f"⚠  模型只给了 {raw_count} 段，已按句子重新切成 {len(segments)} 段")
+        log_hook(f"⚠  Model returned only {raw_count} segments, re-split by sentence into {len(segments)}")
 
     # 整篇一次送进去时，模型偶尔会"偷懒"只处理前半段就收尾。
     # 删掉填充词后本来就会略短，但少太多说明漏了内容。
     src_words = len(transcript.split())
     out_words = sum(len(x["de"].split()) for x in segments)
     if src_words and out_words / src_words < 0.6:
-        log_hook(f"⚠  整理稿只有原文的 {out_words / src_words:.0%}，可能漏掉了后半段。"
-                 f"把 CHUNK_SIZE 调小（比如 12000）再跑一次会更稳。")
+        log_hook(f"⚠  Cleaned text is only {out_words / src_words:.0%} of the original; the second half may be missing. "
+                 f"Lowering CHUNK_SIZE (e.g. 12000) and rerunning is more reliable.")
 
     missing_zh = sum(1 for x in segments if not x["zh"])
     if missing_zh:
-        log_hook(f"⚠  有 {missing_zh}/{len(segments)} 段没给出中文翻译")
+        log_hook(f"⚠  {missing_zh}/{len(segments)} segments have no Chinese translation")
 
     return {"segments": segments}
 
@@ -603,9 +603,9 @@ def _drop_fabricated(data: dict, transcript: str) -> dict:
         items = data.get(key) or []
         kept = [x for x in items if _quoted_from(x.get(field, ""), haystack)]
         if len(kept) < len(items):
-            log_hook(f"⚠  {key}: 丢掉 {len(items) - len(kept)} 条字幕里查不到的（保留 {len(kept)} 条）")
+            log_hook(f"⚠  {key}: dropped {len(items) - len(kept)} items not found in the transcript (kept {len(kept)})")
         if items and not kept:
-            log_hook(f"⚠  {key} 全部条目都对不上原文，这一节会是空的 —— 建议重跑一次")
+            log_hook(f"⚠  No {key} items match the transcript; this section will be empty. Consider rerunning.")
         data[key] = kept
     return data
 
@@ -626,13 +626,13 @@ def analyze_transcript(corrected: str, api_key: str, level: str) -> dict:
         max_tokens=32000,
         temperature=0.4,
         thinking=4096,
-        label="[整理]",
+        label="[Analysis]",
     ))
     data = _drop_fabricated(data, corrected)
     for key, cap in CAPS.items():
         items = data.get(key) or []
         if len(items) > cap:
-            log_hook(f"⚠  模型给了 {len(items)} 条 {key}，按上限截到 {cap} 条")
+            log_hook(f"⚠  Model returned {len(items)} {key}, truncated to the limit of {cap}")
             items = items[:cap]
         data[key] = items
     return data
@@ -1093,7 +1093,7 @@ class App(tk.Tk):
         tk.Label(inner, text="German Context Builder", font=(FF, 19, "bold"),
                  fg=C["accent"], bg=C["header_bg"]).pack(anchor="w")
         tk.Label(inner,
-                 text="字幕下载  ·  口语改成正确德语  ·  语法 / 词汇 / 实用表达  ·  可做笔记的 PDF",
+                 text="Subtitle download  ·  Spoken → correct German  ·  Grammar / vocab / expressions  ·  Note-taking PDF",
                  font=(FF, 11), fg=C["text_mid"], bg=C["header_bg"]).pack(anchor="w", pady=(4, 0))
 
         tk.Frame(self, bg=C["lavender"], height=2).pack(fill="x")
@@ -1111,7 +1111,7 @@ class App(tk.Tk):
 
         row = tk.Frame(inner, bg=C["card"])
         row.pack(fill="x")
-        self._label(row, "PDF 输出目录").pack(side="left")
+        self._label(row, "PDF output folder").pack(side="left")
         self.output_dir_var = tk.StringVar(
             value=self.config.get("pdf_output_dir", str(Path.home() / "Desktop" / "German_PDF")))
         self._entry(row, self.output_dir_var).pack(side="left", padx=(0, 10))
@@ -1119,13 +1119,13 @@ class App(tk.Tk):
 
         row2 = tk.Frame(inner, bg=C["card"])
         row2.pack(fill="x", pady=(10, 0))
-        self._label(row2, "目标水平").pack(side="left")
+        self._label(row2, "Target level").pack(side="left")
         self.level_var = tk.StringVar(value=self.config.get("level", "B2"))
         ttk.Combobox(row2, textvariable=self.level_var, values=["A2", "B1", "B2", "C1"],
                      width=6, state="readonly", style="Pastel.TCombobox").pack(side="left")
 
         self.open_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(row2, text="完成后自动打开 PDF", variable=self.open_var,
+        tk.Checkbutton(row2, text="Open PDF when done", variable=self.open_var,
                        font=(FF, 10), fg=C["text_mid"], bg=C["card"],
                        activebackground=C["card"], selectcolor=C["card"],
                        highlightthickness=0, bd=0).pack(side="left", padx=(16, 0))
@@ -1205,10 +1205,10 @@ class App(tk.Tk):
     def _check_deps(self):
         missing = check_and_import()
         if missing:
-            self.log_msg(f"缺少依赖 —— 请运行: pip install {' '.join(missing)}")
-        self.log_msg("Ready  ·  贴一个 YouTube 链接，然后点 Build PDF")
+            self.log_msg(f"Missing dependencies. Please run: pip install {' '.join(missing)}")
+        self.log_msg("Ready  ·  Paste a YouTube link, then click Build PDF")
         if not (GEMINI_API_KEY or self.config.get("api_key")):
-            self.log_msg(f"⚠  没有找到 API Key —— 请打开 {self.config_file} 填入 api_key")
+            self.log_msg(f"⚠  No API key found. Open {self.config_file} and fill in api_key")
 
     def log_msg(self, msg: str):
         def write():
@@ -1231,15 +1231,15 @@ class App(tk.Tk):
         out_dir = self.output_dir_var.get().strip()
 
         if not url:
-            messagebox.showwarning("缺少链接", "请先贴一个 YouTube 链接。")
+            messagebox.showwarning("Missing link", "Please paste a YouTube link first.")
             return
         if not api_key:
             messagebox.showwarning(
-                "缺少 API Key",
-                f"请用文本编辑器打开下面这个文件，把 Gemini API Key 填进 api_key：\n\n{self.config_file}")
+                "Missing API Key",
+                f"Open the file below in a text editor and put your Gemini API key in api_key:\n\n{self.config_file}")
             return
         if not out_dir:
-            messagebox.showwarning("缺少目录", "请先选择 PDF 的输出目录。")
+            messagebox.showwarning("Missing folder", "Please choose a PDF output folder first.")
             return
 
         self._save_config()
@@ -1257,44 +1257,44 @@ class App(tk.Tk):
             os.makedirs(out_dir, exist_ok=True)
 
             # 1 ── 字幕
-            self._set_status("解析视频 ID …")
+            self._set_status("Parsing video ID …")
             video_id = extract_video_id(url)
             if not video_id:
-                raise ValueError("看不懂这个链接，请检查格式。")
+                raise ValueError("Could not parse this link. Please check the format.")
             self.log_msg(f"Video ID: {video_id}")
 
-            self._set_status("下载字幕 …")
+            self._set_status("Downloading subtitles …")
             transcript, lang = get_transcript(video_id)
             if len(transcript) > MAX_TRANSCRIPT:
                 transcript = transcript[:MAX_TRANSCRIPT]
-                self.log_msg(f"字幕过长，只处理前 {MAX_TRANSCRIPT:,} 字符")
-            self.log_msg(f"字幕语言: {lang}  ·  {len(transcript):,} 字符")
+                self.log_msg(f"Transcript too long, processing only the first {MAX_TRANSCRIPT:,} characters")
+            self.log_msg(f"Subtitle language: {lang}  ·  {len(transcript):,} characters")
             if not lang.lower().startswith("de"):
-                self.log_msg("⚠  这条字幕不是德语，结果可能不理想")
+                self.log_msg("⚠  These subtitles are not German; results may be poor")
 
             # 2 ── 口语 → 标准德语
             n_chunks = len(chunk_text(transcript))
-            self._set_status(f"整理字幕 + 翻译 …  共 {n_chunks} 块")
+            self._set_status(f"Cleaning up transcript + translating …  {n_chunks} chunk(s)")
             cache_file = Path(out_dir) / ".cache" / f"{video_id}.correction.json"
             corrected = correct_transcript(
                 transcript, api_key,
-                progress=lambda i, n: self._set_status(f"整理中 …  {i}/{n}"),
+                progress=lambda i, n: self._set_status(f"Processing …  {i}/{n}"),
                 cache_file=cache_file)
             zh_ok = sum(1 for x in corrected["segments"] if x.get("zh"))
-            self.log_msg(f"字幕整理完成 · {len(corrected['segments'])} 段 · "
-                         f"中文翻译 {zh_ok} 段")
+            self.log_msg(f"Transcript cleaned · {len(corrected['segments'])} segments · "
+                         f"{zh_ok} translated")
 
-            full_text = "\n".join(corrected["segments"])
+            full_text = "\n".join(seg["de"] for seg in corrected["segments"])
 
             # 3 ── 语法 / 词汇 / 实用表达
-            self._set_status(f"整理语法、词汇和实用表达  (目标 {level}) …")
+            self._set_status(f"Analyzing grammar, vocabulary and expressions  (target {level}) …")
             analysis = analyze_transcript(full_text, api_key, level)
-            self.log_msg(f"语法点 {len(analysis['grammar_points'])} · "
-                         f"高频用法 {len(analysis['phrases'])} · "
-                         f"实用表达 {len(analysis['expressions'])}")
+            self.log_msg(f"Grammar points {len(analysis['grammar_points'])} · "
+                         f"Phrases {len(analysis['phrases'])} · "
+                         f"Expressions {len(analysis['expressions'])}")
 
             # 4 ── PDF
-            self._set_status("生成 PDF …")
+            self._set_status("Generating PDF …")
             title = analysis.get("title") or "Deutsch"
             filename = f"{safe_filename(title)}_{video_id}.pdf"
             path = os.path.join(out_dir, filename)
@@ -1302,7 +1302,7 @@ class App(tk.Tk):
                       {"url": url, "lang": lang, "level": level,
                        "footer": f"{title} · {video_id}"},
                       path)
-            self.log_msg(f"已保存 → {path}")
+            self.log_msg(f"Saved → {path}")
 
             # 全流程跑通了，进度缓存就没用了
             try:
@@ -1312,12 +1312,12 @@ class App(tk.Tk):
 
             self.log_msg("─" * 52)
             for g in analysis["grammar_points"][:5]:
-                self.log_msg(f"  语法  {g.get('name','')}")
+                self.log_msg(f"  Grammar     {g.get('name','')}")
             for e in analysis["expressions"][:5]:
-                self.log_msg(f"  表达  {e.get('de','')}")
+                self.log_msg(f"  Expression  {e.get('de','')}")
             self.log_msg("─" * 52)
 
-            self._set_status(f"完成  ·  {filename}")
+            self._set_status(f"Done  ·  {filename}")
             self.after(0, lambda: self.url_var.set(""))
 
             if auto_open:
@@ -1333,7 +1333,7 @@ class App(tk.Tk):
 
         except Exception as e:
             self.log_msg(f"Error: {e}")
-            self._set_status(f"失败: {str(e)[:70]}")
+            self._set_status(f"Failed: {str(e)[:70]}")
         finally:
             self.after(0, lambda: self.run_btn.configure(state="normal", bg=C["accent"]))
             self.after(0, self.progress_bar.stop)
